@@ -4,35 +4,41 @@
 #include <vector>
 #include "network.h"
 
+struct Transition {
+    std::vector<float> state;
+    std::vector<float> action;
+    float reward;
+    std::vector<float> nextState;
+    bool done;
+};
+
 struct SAC {
     // SAC parameters
-    float alpha; // Temperature parameter
+    float alpha;
     int batchSize;
     int updatesPerStep;
-
-    // Neural networks for policy and value functions
+    int learnStart;
+    
+    int obsDim, actionDim;
+    
+    // Neural networks on GPU
     NeuralNetwork policyNetwork;
+    NeuralNetwork qNetwork1;
+    NeuralNetwork qNetwork2;
     NeuralNetwork valueNetwork;
-
-    // Replay buffer for storing transitions
+    NeuralNetwork targetValueNetwork;
+    
+    // Replay buffer
     std::vector<Transition> replayBuffer;
-
+    int maxReplaySize;
+    
     // Constructor
-    SAC(int obsDim, int actionDim, float alpha, int batchSize, int updatesPerStep);
-
-    // Function to store transitions in the replay buffer
-    void storeTransition(const Transition& transition);
-
-    // Function to update the policy and value networks
+    SAC(int obsDim, int actionDim, unsigned long long seed);
+    
+    void storeTransition(const Transition& t);
     void update();
-
-    // Function to sample a batch from the replay buffer
     void sampleBatch(std::vector<Transition>& batch);
-
-    // Function to select an action based on the current state
-    std::vector<float> act(const std::vector<float>& state, bool training);
-
-    // Function to perform a training step
+    std::vector<float> act(const std::vector<float>& state, bool training = true);
     void train(const std::vector<Transition>& batch);
 };
 

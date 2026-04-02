@@ -1,0 +1,41 @@
+F1 Simulation - Python Version Repository
+=========================================
+
+Location: /Users/valdemarboman/simulationF1-python/
+
+Contents:
+---------
+✓ main.py              (18 KB) - Full simulation with physics and RL training
+✓ sac.py               (7.9 KB) - SAC algorithm with PyTorch/CUDA
+✓ Silverstone.csv      (39 KB) - Track data
+✓ requirements.txt     (121 B) - Python dependencies
+✓ README.md            (2.4 KB) - Complete documentation
+✓ test.py              (1.6 KB) - Verification script
+✓ Makefile             (493 B) - Convenience build targets
+✓ .gitignore           (1.3 KB) - Git configuration
+
+Quick Start:
+-----------
+cd /Users/valdemarboman/simulationF1-python
+pip install -r requirements.txt
+python3 main.py
+
+Or use Makefile:
+make install  # Install dependencies
+make test     # Run verification
+make run      # Run simulation
+
+Features:
+---------
+• Full F1 physics simulation (friction, downforce, acceleration limits)
+• SAC deep reinforcement learning agent
+• CUDA/GPU support (automatic fallback to CPU)
+• Comprehensive logging (CSV outputs)
+• Track geometry: Silverstone circuit
+• 100 episodes, 6000 steps max per episode
+• Replay buffer, neural networks, all training logic intact
+
+Files are standalone and ready for git initialization:
+git init
+git add .
+git commit -m "Initial F1 simulation Python port"
