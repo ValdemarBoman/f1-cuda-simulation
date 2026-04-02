@@ -153,7 +153,7 @@ def get_track_length(track: List[TrackPoint]) -> float:
     return length
 
 
-def nearest_segment_idx(tr: Track, pos: Vec2) -> int:
+def nearest_segment_idx(tr: Track, pos: Vec2, hint_idx: Optional[int] = None, window: int = 40) -> int:
     best = 0
     best_d2 = 1e100
 
@@ -161,7 +161,14 @@ def nearest_segment_idx(tr: Track, pos: Vec2) -> int:
     if n_seg <= 0:
         return 0
 
-    for i in range(n_seg):
+    if hint_idx is None:
+        lo = 0
+        hi = n_seg
+    else:
+        lo = max(0, hint_idx - window)
+        hi = min(n_seg, hint_idx + window + 1)
+
+    for i in range(lo, hi):
         a = tr.points[i].ppos
         b = tr.points[i+1].ppos
         ab = b - a
@@ -180,6 +187,26 @@ def nearest_segment_idx(tr: Track, pos: Vec2) -> int:
         if d2 < best_d2:
             best_d2 = d2
             best = i
+
+    # Fallback to full search if best lies on local window edge.
+    if hint_idx is not None and (best == lo or best == hi - 1):
+        for i in range(n_seg):
+            a = tr.points[i].ppos
+            b = tr.points[i+1].ppos
+            ab = b - a
+            ab2 = ab.dot(ab)
+            if ab2 < 1e-9:
+                continue
+
+            ap = pos - a
+            t = ap.dot(ab) / ab2
+            t = max(0.0, min(1.0, t))
+            proj = a + ab * t
+            d = pos - proj
+            d2 = d.dot(d)
+            if d2 < best_d2:
+                best_d2 = d2
+                best = i
 
     return best
 
@@ -270,8 +297,8 @@ def get_track_index(pos: Vec2, tr: Track) -> int:
     return closest_idx
 
 
-def get_track_position(pos: Vec2, tr: Track, S: List[float]) -> float:
-    i = nearest_segment_idx(tr, pos)
+def get_track_position(pos: Vec2, tr: Track, S: List[float], hint_idx: Optional[int] = None) -> float:
+    i = nearest_segment_idx(tr, pos, hint_idx=hint_idx)
 
     a = tr.points[i].ppos
     b = tr.points[i+1].ppos
@@ -288,8 +315,8 @@ def get_track_position(pos: Vec2, tr: Track, S: List[float]) -> float:
     return S[i] + t * seg_len
 
 
-def get_offset(pos: Vec2, tr: Track) -> float:
-    i = nearest_segment_idx(tr, pos)
+def get_offset(pos: Vec2, tr: Track, hint_idx: Optional[int] = None) -> float:
+    i = nearest_segment_idx(tr, pos, hint_idx=hint_idx)
 
     a = tr.points[i].ppos
     b = tr.points[i+1].ppos
@@ -378,7 +405,8 @@ def main():
         dt = 0.05
         t = 0.0
         s = 0.0
-        s_prev = get_track_position(car.pos, tr, S)
+        seg_hint = 0
+        s_prev = get_track_position(car.pos, tr, S, hint_idx=seg_hint)
         lap_progress = 0.0
         armed_finish = False
         dist = 0.0
@@ -393,9 +421,7 @@ def main():
 
         i = 0
         while s < tr.length:
-            s_before = get_track_position(car.pos, tr, S)
-
-            seg0 = nearest_segment_idx(tr, car.pos)
+            seg0 = nearest_segment_idx(tr, car.pos, hint_idx=seg_hint)
             seg0 = max(0, min(seg0, len(tr.T) - 1))
 
             dir0 = tr.T[seg0]
@@ -434,15 +460,16 @@ def main():
             car.pos += car.vel * dt
             dist += car.vel.norm() * dt
 
-            s_after = get_track_position(car.pos, tr, S)
+            s_after = get_track_position(car.pos, tr, S, hint_idx=seg0)
 
-            seg1 = nearest_segment_idx(tr, car.pos)
+            seg1 = nearest_segment_idx(tr, car.pos, hint_idx=seg0)
             seg1 = max(0, min(seg1, len(tr.T) - 1))
+            seg_hint = seg1
 
             dir1 = tr.T[seg1]
             right1 = tr.N[seg1]
 
-            offset = get_offset(car.pos, tr)
+            offset = get_offset(car.pos, tr, hint_idx=seg1)
 
             ds = progress_ds(s_prev, s_after, tr.length)
             s_prev = s_after
@@ -595,10 +622,12 @@ def main():
                 reward, ds_reward, v_dir_reward, pen_action_log,
                 pen_action_log, pen_offset_log, pen_vperp_log, pen_curv_log, pen_curvLA_log, term_off_log, term_fin_log
             ])
-            step_log.flush()
 
             traj_writer.writerow([ep, i, t, car.pos.x, car.pos.y, s_after, lap_progress, offset])
-            traj_log.flush()
+
+            if i % 100 == 0:
+                step_log.flush()
+                traj_log.flush()
 
             if done or i >= MAX_STEPS:
                 progresses.append(lap_progress)
@@ -607,6 +636,8 @@ def main():
 
                 ep_writer.writerow([ep, i, ep_return, lap_progress, dist, int(off), int(finish), sac.replay_size()])
                 ep_log.flush()
+                step_log.flush()
+                traj_log.flush()
                 break
 
             t += dt

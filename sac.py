@@ -79,32 +79,34 @@ class Actor(nn.Module):
 
         self.net = MLP(obs_dim, 128, 128, 2 * act_dim, lr=3e-4)
 
+    def _distribution(self, obs_t: torch.Tensor):
+        out = self.net(obs_t)
+        if out.dim() == 1:
+            out = out.unsqueeze(0)
+        mu, logstd = torch.chunk(out, 2, dim=-1)
+        logstd = torch.clamp(logstd, self.log_std_min, self.log_std_max)
+        std = torch.exp(logstd)
+        return mu, std
+
+    def sample_action_tensor(self, obs_t: torch.Tensor, deterministic: bool = False):
+        mu, std = self._distribution(obs_t)
+        if deterministic:
+            u = mu
+        else:
+            eps = torch.randn_like(std)
+            u = mu + std * eps
+        a = torch.tanh(u)
+        logp = -0.5 * (((u - mu) / (std + 1e-8)) ** 2 + 2.0 * torch.log(std + 1e-8) + math.log(2.0 * math.pi))
+        logp = logp.sum(dim=-1, keepdim=True)
+        logp = logp - torch.log(torch.clamp(1.0 - a * a, min=1e-6)).sum(dim=-1, keepdim=True)
+        return a, logp
+
     def sample_action(self, obs: List[float], rng: RNG, deterministic: bool = False) -> Tuple[List[float], float]:
+        del rng  # Sampling uses torch RNG on selected device.
         with torch.no_grad():
-            out = self.net(obs)
-
-            if isinstance(out, torch.Tensor):
-                out_np = out.cpu().numpy()
-            else:
-                out_np = np.array(out)
-
-            mu = out_np[:self.act_dim] if out_np.ndim == 1 else out_np[0, :self.act_dim]
-            logstd = out_np[self.act_dim:] if out_np.ndim == 1 else out_np[0, self.act_dim:]
-
-            logstd = np.clip(logstd, self.log_std_min, self.log_std_max)
-            std = np.exp(logstd)
-
-            if deterministic:
-                u = mu
-            else:
-                eps = np.array([rng.normal(0, 1) for _ in range(self.act_dim)])
-                u = mu + std * eps
-
-            a = np.tanh(u)
-
-            logp = self._compute_logp(u, mu, std, a)
-
-        return a.tolist(), float(logp)
+            obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+            a, logp = self.sample_action_tensor(obs_t, deterministic=deterministic)
+        return a.squeeze(0).detach().cpu().tolist(), float(logp.item())
 
     def _compute_logp(self, u, mu, std, a):
         var = std ** 2
@@ -122,13 +124,8 @@ class Critic(nn.Module):
         self.q = MLP(obs_dim + act_dim, 256, 256, 1, lr=3e-4)
 
     def forward_q(self, obs: List[float], act: List[float]) -> float:
-        x = torch.FloatTensor(obs + act).to(device).unsqueeze(0)
-        q_val = self.q.fc1(x)
-        q_val = F.relu(q_val)
-        q_val = self.q.fc2(q_val)
-        q_val = F.relu(q_val)
-        q_val = self.q.fc3(q_val)
-        return float(q_val.squeeze().item())
+        x = torch.as_tensor(obs + act, dtype=torch.float32, device=device).unsqueeze(0)
+        return float(self.q(x).squeeze().item())
 
 
 class ReplayBuffer:
@@ -210,36 +207,42 @@ class SAC:
 
         batch = self.replay_buffer.sample(self.rng, self.batch_size)
 
-        # Critic update
-        for tr in batch:
-            # Target Q value
-            a2, logp2 = self.actor.sample_action(tr.s2, self.rng, deterministic=False)
+        s = torch.as_tensor(np.asarray([tr.s for tr in batch], dtype=np.float32), device=device)
+        a = torch.as_tensor(np.asarray([tr.a for tr in batch], dtype=np.float32), device=device)
+        s2 = torch.as_tensor(np.asarray([tr.s2 for tr in batch], dtype=np.float32), device=device)
+        r = torch.as_tensor(np.asarray([tr.r for tr in batch], dtype=np.float32), device=device).unsqueeze(1)
+        done = torch.as_tensor(np.asarray([tr.done for tr in batch], dtype=np.float32), device=device).unsqueeze(1)
 
-            qt1 = self.critic_q1_target.forward_q(tr.s2, a2)
-            qt2 = self.critic_q2_target.forward_q(tr.s2, a2)
-            min_qt = min(qt1, qt2)
+        with torch.no_grad():
+            a2, logp2 = self.actor.sample_action_tensor(s2, deterministic=False)
+            q1_t = self.critic_q1_target.q(torch.cat([s2, a2], dim=1))
+            q2_t = self.critic_q2_target.q(torch.cat([s2, a2], dim=1))
+            min_q_t = torch.minimum(q1_t, q2_t)
+            y = r + (1.0 - done) * self.gamma * (min_q_t - self.alpha * logp2)
 
-            y = tr.r + (0.0 if tr.done else self.gamma * (min_qt - self.alpha * logp2))
+        q1_pred = self.critic_q1.q(torch.cat([s, a], dim=1))
+        q2_pred = self.critic_q2.q(torch.cat([s, a], dim=1))
+        loss_q1 = F.mse_loss(q1_pred, y)
+        loss_q2 = F.mse_loss(q2_pred, y)
 
-            # Q1 loss
-            s_tensor = torch.FloatTensor(tr.s).to(device).unsqueeze(0)
-            a_tensor = torch.FloatTensor(tr.a).to(device).unsqueeze(0)
-            y_tensor = torch.FloatTensor([y]).to(device)
+        self.critic_q1.q.optimizer.zero_grad(set_to_none=True)
+        loss_q1.backward()
+        self.critic_q1.q.optimizer.step()
 
-            q1_pred = self.critic_q1.q(torch.cat([s_tensor, a_tensor], dim=1))
-            loss_q1 = F.mse_loss(q1_pred.unsqueeze(0), y_tensor.unsqueeze(0))
+        self.critic_q2.q.optimizer.zero_grad(set_to_none=True)
+        loss_q2.backward()
+        self.critic_q2.q.optimizer.step()
 
-            self.critic_q1.q.optimizer.zero_grad()
-            loss_q1.backward()
-            self.critic_q1.q.optimizer.step()
+        # Policy update
+        a_pi, logp_pi = self.actor.sample_action_tensor(s, deterministic=False)
+        q1_pi = self.critic_q1.q(torch.cat([s, a_pi], dim=1))
+        q2_pi = self.critic_q2.q(torch.cat([s, a_pi], dim=1))
+        min_q_pi = torch.minimum(q1_pi, q2_pi)
+        loss_pi = (self.alpha * logp_pi - min_q_pi).mean()
 
-            # Q2 loss
-            q2_pred = self.critic_q2.q(torch.cat([s_tensor, a_tensor], dim=1))
-            loss_q2 = F.mse_loss(q2_pred.unsqueeze(0), y_tensor.unsqueeze(0))
-
-            self.critic_q2.q.optimizer.zero_grad()
-            loss_q2.backward()
-            self.critic_q2.q.optimizer.step()
+        self.actor.net.optimizer.zero_grad(set_to_none=True)
+        loss_pi.backward()
+        self.actor.net.optimizer.step()
 
         # Target network update
         polyak_update(self.critic_q1_target.parameters(), self.critic_q1.parameters(), self.tau)

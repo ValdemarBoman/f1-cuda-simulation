@@ -123,5 +123,5 @@ dmypy.json
 .pyre/
 
 # Simulation logs and outputs
-logs/
-*.csv
+
+
